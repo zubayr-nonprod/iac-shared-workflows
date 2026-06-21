@@ -1,0 +1,72 @@
+name: 'Scaffold IaC Repository'
+
+# Triggered manually from the GitHub Actions UI.
+# Requires a PAT stored as SCAFFOLD_GITHUB_TOKEN with:
+#   - repo scope (to create repos and push code)
+#   - Or a GitHub App token with contents:write and administration:write on the org.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_name:
+        description: 'Name of the new IaC repository (e.g. iac-aws-networking)'
+        required: true
+        type: string
+      cloud_provider:
+        description: 'Cloud provider for the IaC repo'
+        required: true
+        type: choice
+        options:
+          - aws
+          - azure
+      description:
+        description: 'Repository description (optional)'
+        required: false
+        type: string
+        default: ''
+      visibility:
+        description: 'Repository visibility'
+        required: false
+        type: choice
+        options:
+          - private
+          - internal
+          - public
+        default: private
+
+jobs:
+  scaffold:
+    name: 'Scaffold ${{ inputs.cloud_provider }} repo: ${{ inputs.repo_name }}'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout shared workflows repo
+        uses: actions/checkout@v4
+
+      - name: Create GitHub Repository
+        env:
+          GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
+        run: |
+          gh repo create ${{ github.repository_owner }}/${{ inputs.repo_name }} \
+            --${{ inputs.visibility }} \
+            --description "${{ inputs.description }}"
+
+      - name: Scaffold and push pipeline
+        env:
+          GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
+        run: |
+          mkdir -p scaffold-workspace/.github/workflows
+
+          cp scaffolding/templates/${{ inputs.cloud_provider }}-pipeline.yml \
+             scaffold-workspace/.github/workflows/pipeline.yml
+
+          cd scaffold-workspace
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add origin \
+            https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository_owner }}/${{ inputs.repo_name }}.git
+          git add .
+          git commit -m "chore: scaffold ${{ inputs.cloud_provider }} IaC pipeline"
+          git branch -M main
+          git push -u origin main
