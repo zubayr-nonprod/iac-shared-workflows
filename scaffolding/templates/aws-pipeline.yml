@@ -13,7 +13,7 @@ permissions:
 jobs:
   aws-plan:
     if: github.event_name == 'pull_request'
-    uses: zubayr-nonprod-org/iac-shared-workflows/.github/workflows/terraform/tf-aws-template.yml@main
+    uses: zubayr-nonprod-org/iac-shared-workflows/.github/workflows/tf-aws-template.yml@main
     with:
       environment: 'staging-aws'
       is_apply: false
@@ -22,7 +22,7 @@ jobs:
 
   aws-apply:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    uses: zubayr-nonprod-org/iac-shared-workflows/.github/workflows/terraform/tf-aws-template.yml@main
+    uses: zubayr-nonprod-org/iac-shared-workflows/.github/workflows/tf-aws-template.yml@main
     with:
       environment: 'production-aws'
       is_apply: true
