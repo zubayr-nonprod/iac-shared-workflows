@@ -13,7 +13,7 @@ permissions:
 jobs:
   azure-plan:
     if: github.event_name == 'pull_request'
-    uses: zubayr-nonprod-org/iac-shared-workflows/.github/workflows/tf-azure-template.yml@main
+    uses: zubayr-dev/iac-shared-workflows/.github/workflows/tf-azure-template.yml@main
     with:
       environment: 'staging-azure'
       is_apply: false
@@ -24,7 +24,7 @@ jobs:
 
   azure-apply:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    uses: zubayr-nonprod-org/iac-shared-workflows/.github/workflows/tf-azure-template.yml@main
+    uses: zubayr-dev/iac-shared-workflows/.github/workflows/tf-azure-template.yml@main
     with:
       environment: 'production-azure'
       is_apply: true
