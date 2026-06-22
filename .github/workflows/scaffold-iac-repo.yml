@@ -43,6 +43,15 @@ jobs:
       - name: Checkout shared workflows repo
         uses: actions/checkout@v4
 
+      - name: Check repository does not already exist
+        env:
+          GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
+        run: |
+          if gh repo view ${{ github.repository_owner }}/${{ inputs.repo_name }} &>/dev/null; then
+            echo "Error: Repository '${{ github.repository_owner }}/${{ inputs.repo_name }}' already exists."
+            exit 1
+          fi
+
       - name: Create GitHub Repository
         env:
           GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
