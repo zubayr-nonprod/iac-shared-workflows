@@ -1,0 +1,23 @@
+name: 'Add Terraform Workspace'
+
+# Manually create a new Terraform workspace under iac/ (as iac/ws-<name>).
+# Delegates to the reusable workflow in iac-shared-workflows, which renders
+# the workspace from the shared Copier template and opens a pull request.
+
+on:
+  workflow_dispatch:
+    inputs:
+      workspace_name:
+        description: 'Name of the new Terraform workspace (created at iac/ws-<name>)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  add-workspace:
+    uses: zubayr-dev/iac-shared-workflows/.github/workflows/add-workspace.yml@main
+    with:
+      workspace_name: ${{ inputs.workspace_name }}

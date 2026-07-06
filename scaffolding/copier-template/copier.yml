@@ -1,0 +1,45 @@
+# Copier template for scaffolding Terraform IaC repositories.
+# Docs: https://copier.readthedocs.io
+#
+# Render locally with:
+#   copier copy --defaults \
+#     --data repo_name=iac-aws-networking \
+#     --data cloud_provider=aws \
+#     --data description="Networking infra" \
+#     ./scaffolding/copier-template ./out
+
+# Rendered files live under template/ so this config and the answers
+# file are kept separate from the generated project.
+_subdirectory: template
+_templates_suffix: .jinja
+
+# Clean whitespace handling so Jinja control blocks don't leave
+# stray blank lines/indentation in the rendered .tf files.
+_envops:
+  trim_blocks: true
+  lstrip_blocks: true
+  keep_trailing_newline: true
+
+repo_name:
+  type: str
+  help: Name of the new IaC repository (e.g. iac-aws-networking)
+
+cloud_provider:
+  type: str
+  help: Cloud provider for the IaC repo
+  choices:
+    - aws
+    - azure
+
+workspace_name:
+  type: str
+  help: Name of the initial Terraform workspace (created at iac/ws-<name>)
+  validator: >-
+    {% if not (workspace_name | regex_search('^[a-z0-9]([a-z0-9-]*[a-z0-9])?$')) %}
+    workspace_name must be lowercase alphanumeric with hyphens (e.g. networking).
+    {% endif %}
+
+description:
+  type: str
+  help: Repository description (optional)
+  default: ""

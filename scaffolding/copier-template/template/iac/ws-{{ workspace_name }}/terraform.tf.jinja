@@ -1,0 +1,39 @@
+# terraform.tf
+# Terraform settings, backend, and required providers.
+
+terraform {
+  required_version = ">= 1.5.0"
+
+  required_providers {
+{% if cloud_provider == "aws" %}
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+{% else %}
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 3.0"
+    }
+{% endif %}
+  }
+
+{% if cloud_provider == "aws" %}
+  # Configure your remote backend (e.g. S3 + DynamoDB) here.
+  # backend "s3" {
+  #   bucket         = "my-tfstate-bucket"
+  #   key            = "terraform.tfstate"
+  #   region         = "us-east-1"
+  #   dynamodb_table = "my-tfstate-locks"
+  #   encrypt        = true
+  # }
+{% else %}
+  # Configure your remote backend (e.g. Azure Storage) here.
+  # backend "azurerm" {
+  #   resource_group_name  = "my-tfstate-rg"
+  #   storage_account_name = "mytfstateaccount"
+  #   container_name       = "tfstate"
+  #   key                  = "terraform.tfstate"
+  # }
+{% endif %}
+}

@@ -19,6 +19,10 @@ on:
         options:
           - aws
           - azure
+      workspace_name:
+        description: 'Name of the initial Terraform workspace (created at iac/ws-<name>)'
+        required: true
+        type: string
       description:
         description: 'Repository description (optional)'
         required: false
@@ -60,22 +64,42 @@ jobs:
             --${{ inputs.visibility }} \
             --description "${{ inputs.description }}"
 
-      - name: Scaffold and push pipeline
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Copier
+        run: pipx install copier
+
+      - name: Render scaffold with Copier
+        run: |
+          ROOT=scaffold-workspace
+
+          # Render the full repo (docs/, iac/ws-<name>/ Terraform files, and
+          # the provider-specific pipeline) from the Copier template.
+          # --defaults keeps it non-interactive; all answers are passed via --data.
+          copier copy --defaults \
+            --data repo_name="${{ inputs.repo_name }}" \
+            --data cloud_provider="${{ inputs.cloud_provider }}" \
+            --data workspace_name="${{ inputs.workspace_name }}" \
+            --data description="${{ inputs.description }}" \
+            ./scaffolding/copier-template "$ROOT"
+
+      - name: Commit and push scaffold
         env:
           GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
         run: |
-          mkdir -p scaffold-workspace/.github/workflows
+          ROOT=scaffold-workspace
 
-          cp scaffolding/templates/${{ inputs.cloud_provider }}-pipeline.yml \
-             scaffold-workspace/.github/workflows/pipeline.yml
-
-          cd scaffold-workspace
+          # --- Commit and push ---
+          cd "$ROOT"
           git init
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote add origin \
             https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository_owner }}/${{ inputs.repo_name }}.git
           git add .
-          git commit -m "chore: scaffold ${{ inputs.cloud_provider }} IaC pipeline"
+          git commit -m "chore: scaffold ${{ inputs.cloud_provider }} Terraform IaC repo"
           git branch -M main
           git push -u origin main

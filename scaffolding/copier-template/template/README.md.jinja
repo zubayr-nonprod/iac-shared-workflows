@@ -1,0 +1,46 @@
+# {{ repo_name }}
+
+{{ description }}
+
+Infrastructure-as-Code repository (`{{ cloud_provider }}`) managed with Terraform.
+
+## Structure
+
+```
+.
+├── docs/                       # Documentation
+├── iac/
+│   └── ws-{{ workspace_name }}/   # Terraform working directory
+│       ├── main.tf             # Root module composition
+│       ├── terraform.tf        # Terraform settings, backend, required providers
+│       ├── providers.tf        # Provider configuration
+│       ├── variables.tf        # Input variables
+│       ├── outputs.tf          # Output values
+│       ├── locals.tf           # Local values
+│       └── data.tf             # Data sources
+├── modules/                    # Reusable child modules
+├── scripts/                    # Helper scripts
+└── .github/workflows/pipeline.yml  # CI/CD (plan on PR, apply on merge to main)
+```
+
+Additional workspaces can be added under `iac/` as `ws-<name>/`.
+
+## Workflow
+
+- Open a PR to `main` to run `terraform plan`.
+- Merge to `main` to run `terraform apply`.
+
+## Adding a workspace
+
+Run the **Add Terraform Workspace** workflow (Actions tab → *Run workflow*)
+and provide a workspace name. It scaffolds `iac/ws-<name>/` from the shared
+template and opens a pull request with the new workspace.
+
+## Updating from the template
+
+This repo was scaffolded with [Copier](https://copier.readthedocs.io).
+To pull later improvements from the template, run:
+
+```
+copier update
+```
