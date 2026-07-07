@@ -1,0 +1,106 @@
+name: 'Add Terraform Workspace'
+
+# Reusable workflow that scaffolds a new Terraform workspace (iac/ws-<name>)
+# into the calling IaC repository and opens a pull request with the change.
+# It reuses the same Copier template used to scaffold the repository, so the
+# generated workspace stays consistent with the repo's cloud provider.
+
+on:
+  workflow_call:
+    inputs:
+      workspace_name:
+        description: 'Name of the new Terraform workspace (created at iac/ws-<name>)'
+        required: true
+        type: string
+      template_ref:
+        description: 'Git ref of iac-shared-workflows to source the Copier template from'
+        required: false
+        type: string
+        default: 'main'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  add-workspace:
+    name: 'Add workspace ws-${{ inputs.workspace_name }}'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate workspace name
+        run: |
+          if ! echo "${{ inputs.workspace_name }}" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'; then
+            echo "Error: workspace_name must be lowercase alphanumeric with hyphens (e.g. networking)."
+            exit 1
+          fi
+
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+
+      - name: Ensure workspace does not already exist
+        run: |
+          if [ -d "iac/ws-${{ inputs.workspace_name }}" ]; then
+            echo "Error: workspace 'iac/ws-${{ inputs.workspace_name }}' already exists."
+            exit 1
+          fi
+
+      - name: Determine cloud provider
+        id: answers
+        run: |
+          if [ ! -f .copier-answers.yml ]; then
+            echo "Error: .copier-answers.yml not found; is this a scaffolded IaC repo?"
+            exit 1
+          fi
+          provider=$(grep -E '^cloud_provider:' .copier-answers.yml | awk '{print $2}')
+          if [ -z "$provider" ]; then
+            echo "Error: could not determine cloud_provider from .copier-answers.yml."
+            exit 1
+          fi
+          echo "cloud_provider=$provider" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout shared workflows (template source)
+        uses: actions/checkout@v4
+        with:
+          repository: zubayr-dev/iac-shared-workflows
+          ref: ${{ inputs.template_ref }}
+          path: .iac-shared-workflows
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Copier
+        run: pipx install copier
+
+      - name: Render new workspace
+        run: |
+          # Render the full template to a temp dir, then keep only the new
+          # workspace directory. This reuses the single source-of-truth template.
+          copier copy --defaults \
+            --data repo_name="${{ github.event.repository.name }}" \
+            --data cloud_provider="${{ steps.answers.outputs.cloud_provider }}" \
+            --data workspace_name="${{ inputs.workspace_name }}" \
+            --data description="" \
+            .iac-shared-workflows/scaffolding/copier-template ./.ws-render
+
+          mkdir -p iac
+          cp -R ".ws-render/iac/ws-${{ inputs.workspace_name }}" iac/
+          rm -rf .ws-render .iac-shared-workflows
+
+      - name: Commit and open pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch="add-workspace-${{ inputs.workspace_name }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add "iac/ws-${{ inputs.workspace_name }}"
+          git commit -m "feat: add Terraform workspace ws-${{ inputs.workspace_name }}"
+          git push -u origin "$branch"
+          gh pr create \
+            --title "feat: add Terraform workspace ws-${{ inputs.workspace_name }}" \
+            --body "Adds a new Terraform workspace at \`iac/ws-${{ inputs.workspace_name }}\`." \
+            --base "${{ github.event.repository.default_branch }}" \
+            --head "$branch"
