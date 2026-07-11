@@ -18,6 +18,6 @@ permissions:
 
 jobs:
   add-workspace:
-    uses: zubayr-dev/iac-shared-workflows/.github/workflows/add-workspace.yml@main
+    uses: zubayr-nonprod/iac-shared-workflows/.github/workflows/add-workspace.yml@main
     with:
       workspace_name: ${{ inputs.workspace_name }}

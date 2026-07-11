@@ -61,7 +61,7 @@ jobs:
       - name: Checkout shared workflows (template source)
         uses: actions/checkout@v4
         with:
-          repository: zubayr-dev/iac-shared-workflows
+          repository: zubayr-nonprod/iac-shared-workflows
           ref: ${{ inputs.template_ref }}
           path: .iac-shared-workflows
 
