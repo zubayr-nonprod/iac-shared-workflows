@@ -24,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       repo_name:
-        description: 'Name of the new IaC repository (e.g. iac-aws-networking)'
+        description: 'Base name of the new IaC repo (auto-prefixed with the cloud provider, e.g. "networking" -> "azure-networking")'
         required: true
         type: string
       cloud_provider:
@@ -60,8 +60,11 @@ on:
 
 jobs:
   scaffold:
-    name: 'Scaffold ${{ inputs.cloud_provider }} repo: ${{ inputs.repo_name }}'
+    name: 'Scaffold ${{ inputs.cloud_provider }} repo: ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}'
     runs-on: ubuntu-latest
+    env:
+      # Scaffolded repos are prefixed with the cloud provider (e.g. azure-networking).
+      REPO_NAME: ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}
 
     steps:
       - name: Checkout shared workflows repo
@@ -71,8 +74,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
         run: |
-          if gh repo view ${{ github.repository_owner }}/${{ inputs.repo_name }} &>/dev/null; then
-            echo "Error: Repository '${{ github.repository_owner }}/${{ inputs.repo_name }}' already exists."
+          if gh repo view ${{ github.repository_owner }}/${REPO_NAME} &>/dev/null; then
+            echo "Error: Repository '${{ github.repository_owner }}/${REPO_NAME}' already exists."
             exit 1
           fi
 
@@ -80,7 +83,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
         run: |
-          gh repo create ${{ github.repository_owner }}/${{ inputs.repo_name }} \
+          gh repo create ${{ github.repository_owner }}/${REPO_NAME} \
             --${{ inputs.visibility }} \
             --description "${{ inputs.description }}"
 
@@ -100,7 +103,7 @@ jobs:
           # the provider-specific pipeline) from the Copier template.
           # --defaults keeps it non-interactive; all answers are passed via --data.
           copier copy --defaults \
-            --data repo_name="${{ inputs.repo_name }}" \
+            --data repo_name="${REPO_NAME}" \
             --data cloud_provider="${{ inputs.cloud_provider }}" \
             --data workspace_name="${{ inputs.workspace_name }}" \
             --data description="${{ inputs.description }}" \
@@ -118,14 +121,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote add origin \
-            https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository_owner }}/${{ inputs.repo_name }}.git
+            https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository_owner }}/${REPO_NAME}.git
           git add .
           git commit -m "chore: scaffold ${{ inputs.cloud_provider }} Terraform IaC repo"
           git branch -M main
           git push -u origin main
 
   azure_bootstrap:
-    name: 'Bootstrap Azure OIDC for ${{ inputs.repo_name }}'
+    name: 'Bootstrap Azure OIDC for ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}'
     needs: scaffold
     if: inputs.cloud_provider == 'azure'
     runs-on: ubuntu-latest
@@ -133,6 +136,8 @@ jobs:
       id-token: write
       contents: read
     env:
+      # Scaffolded repos are prefixed with the cloud provider (e.g. azure-networking).
+      REPO_NAME: ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}
       # Use the per-run input if given, otherwise fall back to the repo/org variable.
       APP_ID: ${{ inputs.azure_app_client_id != '' && inputs.azure_app_client_id || vars.AZURE_APP_CLIENT_ID }}
     steps:
@@ -153,7 +158,7 @@ jobs:
       - name: Register federated credentials
         env:
           ORG: ${{ github.repository_owner }}
-          REPO: ${{ inputs.repo_name }}
+          REPO: ${{ env.REPO_NAME }}
         run: |
           # One federated credential per GitHub environment used by the pipeline.
           for env_name in staging-azure production-azure; do
@@ -180,7 +185,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
           ORG: ${{ github.repository_owner }}
-          REPO: ${{ inputs.repo_name }}
+          REPO: ${{ env.REPO_NAME }}
           TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
