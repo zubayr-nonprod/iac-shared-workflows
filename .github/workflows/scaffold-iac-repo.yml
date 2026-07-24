@@ -143,8 +143,11 @@ jobs:
     steps:
       - name: Validate Azure inputs
         run: |
+          echo "input given?   ${{ inputs.azure_app_client_id != '' }}"
+          echo "vars set?      ${{ vars.AZURE_APP_CLIENT_ID != '' }}"
+          echo "APP_ID length: ${#APP_ID}"
           if [ -z "${APP_ID}" ]; then
-            echo "Error: no Azure app client ID. Provide the 'azure_app_client_id' input or set the AZURE_APP_CLIENT_ID variable."
+            echo "Error: no Azure app client ID. Provide the 'azure_app_client_id' input or set the AZURE_APP_CLIENT_ID Actions *variable* (Variables tab, not Secrets)."
             exit 1
           fi
 
