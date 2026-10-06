@@ -6,9 +6,9 @@ name: 'Scaffold IaC Repository'
 #   - Or a GitHub App token with contents:write and administration:write on the org.
 #
 # For Azure repos, the optional bootstrap job also needs these secrets configured
-# on THIS (iac-shared-workflows) repo, plus a bootstrap app registration whose
-# federated credential trusts subject
-# 'repo:<owner>/iac-shared-workflows:ref:refs/heads/main':
+# on the 'production' environment of THIS (iac-shared-workflows) repo, plus a
+# bootstrap app registration whose federated credential trusts subject
+# 'repo:<owner>/iac-shared-workflows:environment:production':
 #   - AZURE_BOOTSTRAP_CLIENT_ID : client ID of the bootstrap app used to log in here
 #   - AZURE_TENANT_ID           : Entra tenant ID
 #   - AZURE_SUBSCRIPTION_ID      : target subscription ID
@@ -132,6 +132,8 @@ jobs:
     needs: scaffold
     if: inputs.cloud_provider == 'azure'
     runs-on: ubuntu-latest
+    # The AZURE_* bootstrap secrets are environment secrets on 'production'.
+    environment: production
     permissions:
       id-token: write
       contents: read
