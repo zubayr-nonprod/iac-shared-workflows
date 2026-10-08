@@ -177,14 +177,36 @@ jobs:
           ORG: ${{ github.repository_owner }}
           REPO: ${{ env.REPO_NAME }}
         run: |
+          cred_exists() {
+            [ "$(az ad app federated-credential list --id "$APP_ID" --query "length([?name=='$1'])" -o tsv)" = "1" ]
+          }
+
           # One federated credential per GitHub environment used by the pipeline.
           for env_name in staging-azure production-azure; do
-            az ad app federated-credential create --id "$APP_ID" --parameters "{
-              \"name\": \"gh-${REPO}-${env_name}\",
-              \"issuer\": \"https://token.actions.githubusercontent.com\",
-              \"subject\": \"repo:${ORG}/${REPO}:environment:${env_name}\",
-              \"audiences\": [\"api://AzureADTokenExchange\"]
-            }"
+            name="gh-${REPO}-${env_name}"
+            # Entra rejects concurrent writes to the same app, and a "failed" create may
+            # still have landed, so re-check existence before each retry.
+            for attempt in 1 2 3 4 5; do
+              if cred_exists "$name"; then
+                echo "Federated credential '$name' exists."
+                break
+              fi
+              if az ad app federated-credential create --id "$APP_ID" -o none --parameters "{
+                \"name\": \"${name}\",
+                \"issuer\": \"https://token.actions.githubusercontent.com\",
+                \"subject\": \"repo:${ORG}/${REPO}:environment:${env_name}\",
+                \"audiences\": [\"api://AzureADTokenExchange\"]
+              }"; then
+                echo "Created federated credential '$name'."
+                break
+              fi
+              if [ "$attempt" -eq 5 ]; then
+                echo "Error: failed to create federated credential '$name' after $attempt attempts."
+                exit 1
+              fi
+              echo "Attempt $attempt failed; retrying in $((attempt * 10))s..."
+              sleep $((attempt * 10))
+            done
           done
 
       - name: Assign Contributor role to the service principal
