@@ -17,6 +17,10 @@ on:
         required: false
         type: string
         default: 'main'
+    secrets:
+      ORG_PAT:
+        description: 'PAT with contents:read access to zubayr-nonprod/iac-shared-workflows (required: repo is private)'
+        required: true
 
 permissions:
   contents: write
@@ -64,6 +68,7 @@ jobs:
           repository: zubayr-nonprod/iac-shared-workflows
           ref: ${{ inputs.template_ref }}
           path: .iac-shared-workflows
+          token: ${{ secrets.ORG_PAT }}
 
       - name: Set up Python
         uses: actions/setup-python@v5

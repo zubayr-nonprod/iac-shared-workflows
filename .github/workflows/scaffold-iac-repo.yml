@@ -6,9 +6,9 @@ name: 'Scaffold IaC Repository'
 #   - Or a GitHub App token with contents:write and administration:write on the org.
 #
 # For Azure repos, the optional bootstrap job also needs these secrets configured
-# on THIS (iac-shared-workflows) repo, plus a bootstrap app registration whose
-# federated credential trusts subject
-# 'repo:<owner>/iac-shared-workflows:ref:refs/heads/main':
+# on the 'production' environment of THIS (iac-shared-workflows) repo, plus a
+# bootstrap app registration whose federated credential trusts subject
+# 'repo:<owner>/iac-shared-workflows:environment:production':
 #   - AZURE_BOOTSTRAP_CLIENT_ID : client ID of the bootstrap app used to log in here
 #   - AZURE_TENANT_ID           : Entra tenant ID
 #   - AZURE_SUBSCRIPTION_ID      : target subscription ID
@@ -132,6 +132,8 @@ jobs:
     needs: scaffold
     if: inputs.cloud_provider == 'azure'
     runs-on: ubuntu-latest
+    # The AZURE_* bootstrap secrets are environment secrets on 'production'.
+    environment: production
     permissions:
       id-token: write
       contents: read
@@ -140,20 +142,35 @@ jobs:
       REPO_NAME: ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}
       # Use the per-run input if given, otherwise fall back to the repo/org variable.
       APP_ID: ${{ inputs.azure_app_client_id != '' && inputs.azure_app_client_id || vars.AZURE_APP_CLIENT_ID }}
+      # IDs aren't sensitive, so accept them as either Actions secrets or variables.
+      BOOTSTRAP_CLIENT_ID: ${{ secrets.AZURE_BOOTSTRAP_CLIENT_ID || vars.AZURE_BOOTSTRAP_CLIENT_ID }}
+      TENANT_ID: ${{ secrets.AZURE_TENANT_ID || vars.AZURE_TENANT_ID }}
+      SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID || vars.AZURE_SUBSCRIPTION_ID }}
     steps:
       - name: Validate Azure inputs
         run: |
+          echo "input given?   ${{ inputs.azure_app_client_id != '' }}"
+          echo "vars set?      ${{ vars.AZURE_APP_CLIENT_ID != '' }}"
+          echo "APP_ID length: ${#APP_ID}"
           if [ -z "${APP_ID}" ]; then
-            echo "Error: no Azure app client ID. Provide the 'azure_app_client_id' input or set the AZURE_APP_CLIENT_ID variable."
+            echo "Error: no Azure app client ID. Provide the 'azure_app_client_id' input or set the AZURE_APP_CLIENT_ID Actions *variable* (Variables tab, not Secrets)."
             exit 1
           fi
+          missing=0
+          for name in BOOTSTRAP_CLIENT_ID TENANT_ID SUBSCRIPTION_ID; do
+            if [ -z "${!name}" ]; then
+              echo "Error: AZURE_${name} is not set as a repo/org secret or variable accessible to ${{ github.repository }}."
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
 
       - name: Azure login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_BOOTSTRAP_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ env.BOOTSTRAP_CLIENT_ID }}
+          tenant-id: ${{ env.TENANT_ID }}
+          subscription-id: ${{ env.SUBSCRIPTION_ID }}
 
       - name: Register federated credentials
         env:
@@ -171,8 +188,6 @@ jobs:
           done
 
       - name: Assign Contributor role to the service principal
-        env:
-          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
           OBJECT_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
           az role assignment create \
@@ -186,8 +201,6 @@ jobs:
           GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
           ORG: ${{ github.repository_owner }}
           REPO: ${{ env.REPO_NAME }}
-          TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
           for env_name in staging-azure production-azure; do
             gh api -X PUT "repos/${ORG}/${REPO}/environments/${env_name}" >/dev/null
