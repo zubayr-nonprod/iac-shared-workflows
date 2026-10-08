@@ -1,0 +1,123 @@
+name: 'Delete IaC Repository'
+
+# Triggered manually. Tears down a repo created by 'Scaffold IaC Repository' so the
+# same name can be reused while developing/testing the scaffold workflow.
+#
+# Removes:
+#   - Federated credentials on the Azure app (AZURE_APP_CLIENT_ID) whose subject
+#     references the repo (azure-* repos only).
+#   - The GitHub repository itself (its environments and secrets go with it).
+#
+# Deliberately NOT removed:
+#   - The Contributor role assignment for the Azure app; it's shared by every scaffolded repo.
+#   - Any cloud resources the repo's pipeline deployed. Run 'terraform destroy' first if needed.
+#
+# Requires:
+#   - SCAFFOLD_GITHUB_TOKEN with Administration: read & write (or classic 'delete_repo' scope).
+#   - The same 'production' environment secrets as the scaffold workflow's azure_bootstrap job.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_name:
+        description: 'Full name of the repo to delete, including cloud prefix (e.g. "azure-networking")'
+        required: true
+        type: string
+      confirm:
+        description: 'Type the repo name again to confirm deletion'
+        required: true
+        type: string
+
+jobs:
+  validate:
+    name: 'Validate ${{ inputs.repo_name }}'
+    runs-on: ubuntu-latest
+    outputs:
+      exists: ${{ steps.check.outputs.exists }}
+    env:
+      REPO_NAME: ${{ inputs.repo_name }}
+      CONFIRM: ${{ inputs.confirm }}
+    steps:
+      - name: Validate inputs
+        run: |
+          if [ "$REPO_NAME" != "$CONFIRM" ]; then
+            echo "Error: confirmation '$CONFIRM' does not match repo name '$REPO_NAME'."
+            exit 1
+          fi
+          if ! [[ "$REPO_NAME" =~ ^(aws|azure)-[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+            echo "Error: only scaffolded repos named 'aws-<name>' or 'azure-<name>' can be deleted."
+            exit 1
+          fi
+
+      - name: Check repository exists and was scaffolded
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
+          ORG: ${{ github.repository_owner }}
+        run: |
+          if ! out=$(gh api "repos/${ORG}/${REPO_NAME}" --silent 2>&1); then
+            if grep -q 'HTTP 404' <<<"$out"; then
+              echo "Repository ${ORG}/${REPO_NAME} not found; will only clean up Azure references."
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Error checking repository: $out"
+            exit 1
+          fi
+          # Guard against deleting repos that weren't created from the Copier template.
+          if ! gh api "repos/${ORG}/${REPO_NAME}/contents/.copier-answers.yml" --silent 2>/dev/null; then
+            echo "Error: ${ORG}/${REPO_NAME} has no .copier-answers.yml; refusing to delete a non-scaffolded repo."
+            exit 1
+          fi
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+
+  azure_cleanup:
+    name: 'Remove Azure federated credentials for ${{ inputs.repo_name }}'
+    needs: validate
+    if: startsWith(inputs.repo_name, 'azure-')
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      REPO_NAME: ${{ inputs.repo_name }}
+      APP_ID: ${{ vars.AZURE_APP_CLIENT_ID }}
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_BOOTSTRAP_CLIENT_ID || vars.AZURE_BOOTSTRAP_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID || vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID || vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Delete federated credentials referencing the repo
+        env:
+          ORG: ${{ github.repository_owner }}
+        run: |
+          # The trailing ':' stops 'azure-foo' from matching 'azure-foo-bar'.
+          prefix="repo:${ORG}/${REPO_NAME}:"
+          ids=$(az ad app federated-credential list --id "$APP_ID" \
+            --query "[?starts_with(subject, '${prefix}')].id" -o tsv)
+          if [ -z "$ids" ]; then
+            echo "No federated credentials reference ${ORG}/${REPO_NAME}."
+            exit 0
+          fi
+          for id in $ids; do
+            echo "Deleting federated credential $id"
+            az ad app federated-credential delete --id "$APP_ID" --federated-credential-id "$id"
+          done
+
+  delete_repo:
+    name: 'Delete repo ${{ inputs.repo_name }}'
+    needs: [validate, azure_cleanup]
+    # Run even when azure_cleanup is skipped (aws-* repos), but not if it failed.
+    if: always() && needs.validate.result == 'success' && needs.validate.outputs.exists == 'true' && needs.azure_cleanup.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete GitHub repository
+        env:
+          GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
+          ORG: ${{ github.repository_owner }}
+          REPO_NAME: ${{ inputs.repo_name }}
+        run: gh repo delete "${ORG}/${REPO_NAME}" --yes
