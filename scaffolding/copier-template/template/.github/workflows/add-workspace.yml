@@ -21,3 +21,5 @@ jobs:
     uses: zubayr-nonprod/iac-shared-workflows/.github/workflows/add-workspace.yml@main
     with:
       workspace_name: ${{ inputs.workspace_name }}
+    secrets:
+      ORG_PAT: ${{ secrets.ORG_PAT }}

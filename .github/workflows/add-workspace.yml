@@ -98,12 +98,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           branch="add-workspace-${{ inputs.workspace_name }}"
+          existing_pr=$(gh pr list --head "$branch" --state open --json url -q '.[0].url')
+          if [ -n "$existing_pr" ]; then
+            echo "Error: a pull request for '$branch' is already open: $existing_pr"
+            exit 1
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "$branch"
           git add "iac/ws-${{ inputs.workspace_name }}"
           git commit -m "feat: add Terraform workspace ws-${{ inputs.workspace_name }}"
-          git push -u origin "$branch"
+          # No open PR, so any existing remote branch is a leftover from a failed run.
+          git push --force -u origin "$branch"
           gh pr create \
             --title "feat: add Terraform workspace ws-${{ inputs.workspace_name }}" \
             --body "Adds a new Terraform workspace at \`iac/ws-${{ inputs.workspace_name }}\`." \
