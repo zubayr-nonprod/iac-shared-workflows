@@ -41,6 +41,11 @@ jobs:
     name: 'Terraform Azure (${{ inputs.environment }})'
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+    env:
+      # Fail on missing variables instead of hanging on an interactive prompt.
+      TF_INPUT: false
+      TF_IN_AUTOMATION: true
+      TF_VAR_environment: ${{ inputs.environment }}
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
@@ -55,12 +60,33 @@ jobs:
           terraform_version: ${{ inputs.tf_version }}
 
       - name: Terraform Init
-        run: terraform init
+        run: |
+          if ! grep -qs 'backend "azurerm"' *.tf; then
+            echo "Error: no 'backend \"azurerm\" {}' block in ${{ inputs.working_directory }}; refusing to use local state."
+            exit 1
+          fi
+          if [ -z "$TF_STATE_STORAGE_ACCOUNT" ]; then
+            echo "Error: TF_STATE_* org variables are not set."
+            exit 1
+          fi
+          # Staging/production are approval gates over the same deployment, so one state per workspace.
+          terraform init \
+            -backend-config="subscription_id=${TF_STATE_SUBSCRIPTION_ID}" \
+            -backend-config="resource_group_name=${TF_STATE_RESOURCE_GROUP}" \
+            -backend-config="storage_account_name=${TF_STATE_STORAGE_ACCOUNT}" \
+            -backend-config="container_name=${TF_STATE_CONTAINER}" \
+            -backend-config="key=${{ github.event.repository.name }}/${{ inputs.working_directory }}.tfstate" \
+            -backend-config="use_oidc=true" \
+            -backend-config="use_azuread_auth=true"
         env:
           ARM_USE_OIDC: true
           ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_STATE_SUBSCRIPTION_ID: ${{ vars.TF_STATE_SUBSCRIPTION_ID }}
+          TF_STATE_RESOURCE_GROUP: ${{ vars.TF_STATE_RESOURCE_GROUP }}
+          TF_STATE_STORAGE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
+          TF_STATE_CONTAINER: ${{ vars.TF_STATE_CONTAINER }}
 
       - name: Terraform Plan
         run: terraform plan -out=tfplan

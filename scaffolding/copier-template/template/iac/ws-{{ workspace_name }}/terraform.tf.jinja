@@ -28,12 +28,7 @@ terraform {
   #   encrypt        = true
   # }
 {% else %}
-  # Configure your remote backend (e.g. Azure Storage) here.
-  # backend "azurerm" {
-  #   resource_group_name  = "my-tfstate-rg"
-  #   storage_account_name = "mytfstateaccount"
-  #   container_name       = "tfstate"
-  #   key                  = "terraform.tfstate"
-  # }
+  # Values are supplied at 'terraform init' by the shared tf-azure-template pipeline.
+  backend "azurerm" {}
 {% endif %}
 }

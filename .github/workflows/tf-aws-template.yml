@@ -40,6 +40,11 @@ jobs:
     name: 'Terraform AWS (${{ inputs.environment }})'
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+    env:
+      # Fail on missing variables instead of hanging on an interactive prompt.
+      TF_INPUT: false
+      TF_IN_AUTOMATION: true
+      TF_VAR_environment: ${{ inputs.environment }}
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
