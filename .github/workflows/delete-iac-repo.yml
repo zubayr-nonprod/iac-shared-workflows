@@ -65,9 +65,14 @@ jobs:
             exit 1
           fi
           # Guard against deleting repos that weren't created from the Copier template.
+          # Empty repos are allowed: the scaffold creates the repo before the Azure bootstrap and push.
           if ! gh api "repos/${ORG}/${REPO_NAME}/contents/.copier-answers.yml" --silent 2>/dev/null; then
-            echo "Error: ${ORG}/${REPO_NAME} has no .copier-answers.yml; refusing to delete a non-scaffolded repo."
-            exit 1
+            if gh api "repos/${ORG}/${REPO_NAME}/commits?per_page=1" --silent 2>&1 | grep -q 'HTTP 409'; then
+              echo "${ORG}/${REPO_NAME} is empty (scaffold didn't finish); OK to delete."
+            else
+              echo "Error: ${ORG}/${REPO_NAME} has no .copier-answers.yml; refusing to delete a non-scaffolded repo."
+              exit 1
+            fi
           fi
           echo "exists=true" >> "$GITHUB_OUTPUT"
 
