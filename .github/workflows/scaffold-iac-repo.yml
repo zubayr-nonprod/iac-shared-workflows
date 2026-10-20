@@ -161,9 +161,18 @@ jobs:
 
       - name: Register federated credentials
         env:
+          GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
           ORG: ${{ github.repository_owner }}
           REPO: ${{ env.REPO_NAME }}
         run: |
+          # New repos may use immutable subjects (repo:<org>@<id>/<repo>@<id>), so ask GitHub for the exact prefix.
+          prefix=$(gh api "repos/${ORG}/${REPO}/actions/oidc/customization/sub" -q '.sub_claim_prefix')
+          if [ -z "$prefix" ]; then
+            echo "Error: could not read the OIDC subject prefix for ${ORG}/${REPO}."
+            exit 1
+          fi
+          echo "OIDC subject prefix: $prefix"
+
           cred_exists() {
             [ "$(az ad app federated-credential list --id "$APP_ID" --query "length([?name=='$1'])" -o tsv)" = "1" ]
           }
@@ -181,7 +190,7 @@ jobs:
               if az ad app federated-credential create --id "$APP_ID" -o none --parameters "{
                 \"name\": \"${name}\",
                 \"issuer\": \"https://token.actions.githubusercontent.com\",
-                \"subject\": \"repo:${ORG}/${REPO}:environment:${env_name}\",
+                \"subject\": \"${prefix}:environment:${env_name}\",
                 \"audiences\": [\"api://AzureADTokenExchange\"]
               }"; then
                 echo "Created federated credential '$name'."

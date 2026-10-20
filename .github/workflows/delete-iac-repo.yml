@@ -100,10 +100,10 @@ jobs:
         env:
           ORG: ${{ github.repository_owner }}
         run: |
-          # The trailing ':' stops 'azure-foo' from matching 'azure-foo-bar'.
-          prefix="repo:${ORG}/${REPO_NAME}:"
-          ids=$(az ad app federated-credential list --id "$APP_ID" \
-            --query "[?starts_with(subject, '${prefix}')].id" -o tsv)
+          # Matches both 'repo:<org>/<repo>:' and immutable 'repo:<org>@<id>/<repo>@<id>:' subjects.
+          pattern="^repo:${ORG}(@[0-9]+)?/${REPO_NAME}(@[0-9]+)?:"
+          ids=$(az ad app federated-credential list --id "$APP_ID" --query '[].[id, subject]' -o tsv \
+            | awk -F'\t' -v p="$pattern" '$2 ~ p { print $1 }')
           if [ -z "$ids" ]; then
             echo "No federated credentials reference ${ORG}/${REPO_NAME}."
             exit 0
