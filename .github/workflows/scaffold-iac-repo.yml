@@ -129,10 +129,10 @@ jobs:
       REPO_NAME: ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}
       # Use the per-run input if given, otherwise fall back to the repo/org variable.
       APP_ID: ${{ inputs.azure_app_client_id != '' && inputs.azure_app_client_id || vars.AZURE_APP_CLIENT_ID }}
-      # IDs aren't sensitive, so accept them as either Actions secrets or variables.
-      BOOTSTRAP_CLIENT_ID: ${{ secrets.AZURE_BOOTSTRAP_CLIENT_ID || vars.AZURE_BOOTSTRAP_CLIENT_ID }}
-      TENANT_ID: ${{ secrets.AZURE_TENANT_ID || vars.AZURE_TENANT_ID }}
-      SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID || vars.AZURE_SUBSCRIPTION_ID }}
+      # IDs aren't sensitive, so accept them as either Actions variables (preferred) or secrets.
+      BOOTSTRAP_CLIENT_ID: ${{ vars.AZURE_BOOTSTRAP_CLIENT_ID || secrets.AZURE_BOOTSTRAP_CLIENT_ID }}
+      TENANT_ID: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
+      SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
     steps:
       - name: Validate Azure inputs
         run: |
@@ -214,7 +214,7 @@ jobs:
             --role "Contributor" \
             --scope "/subscriptions/${SUBSCRIPTION_ID}"
 
-      - name: Configure GitHub environments and secrets
+      - name: Configure GitHub environments and variables
         env:
           GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
           ORG: ${{ github.repository_owner }}
@@ -223,9 +223,10 @@ jobs:
           for env_name in staging-azure production-azure; do
             gh api -X PUT "repos/${ORG}/${REPO}/environments/${env_name}" >/dev/null
           done
-          gh secret set AZURE_CLIENT_ID       -R "${ORG}/${REPO}" -b "$APP_ID"
-          gh secret set AZURE_TENANT_ID       -R "${ORG}/${REPO}" -b "$TENANT_ID"
-          gh secret set AZURE_SUBSCRIPTION_ID -R "${ORG}/${REPO}" -b "$SUBSCRIPTION_ID"
+          # Identifiers only (OIDC has no client secret), so variables keep them visible in logs.
+          gh variable set AZURE_CLIENT_ID       -R "${ORG}/${REPO}" -b "$APP_ID"
+          gh variable set AZURE_TENANT_ID       -R "${ORG}/${REPO}" -b "$TENANT_ID"
+          gh variable set AZURE_SUBSCRIPTION_ID -R "${ORG}/${REPO}" -b "$SUBSCRIPTION_ID"
 
   push_scaffold:
     name: 'Push scaffold to ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}'

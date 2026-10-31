@@ -21,16 +21,17 @@ on:
         required: false
         type: string
         default: 'latest'
+    # Prefer the AZURE_* Actions variables; these secrets are a fallback for repos scaffolded before the switch.
     secrets:
       AZURE_CLIENT_ID:
-        description: 'Azure AD App Client ID for OIDC authentication'
-        required: true
+        description: 'Azure AD App Client ID for OIDC authentication (deprecated: use the AZURE_CLIENT_ID variable)'
+        required: false
       AZURE_TENANT_ID:
-        description: 'Azure AD Tenant ID'
-        required: true
+        description: 'Azure AD Tenant ID (deprecated: use the AZURE_TENANT_ID variable)'
+        required: false
       AZURE_SUBSCRIPTION_ID:
-        description: 'Azure Subscription ID'
-        required: true
+        description: 'Azure Subscription ID (deprecated: use the AZURE_SUBSCRIPTION_ID variable)'
+        required: false
 
 permissions:
   id-token: write
@@ -46,6 +47,14 @@ jobs:
       TF_INPUT: false
       TF_IN_AUTOMATION: true
       TF_VAR_environment: ${{ inputs.environment }}
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID || secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_STATE_SUBSCRIPTION_ID: ${{ vars.TF_STATE_SUBSCRIPTION_ID }}
+      TF_STATE_RESOURCE_GROUP: ${{ vars.TF_STATE_RESOURCE_GROUP }}
+      TF_STATE_STORAGE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
+      TF_STATE_CONTAINER: ${{ vars.TF_STATE_CONTAINER }}
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
@@ -61,12 +70,17 @@ jobs:
 
       - name: Terraform Init
         run: |
+          missing=0
+          for name in ARM_CLIENT_ID ARM_TENANT_ID ARM_SUBSCRIPTION_ID TF_STATE_STORAGE_ACCOUNT; do
+            if [ -z "${!name}" ]; then
+              echo "Error: $name is empty; set the AZURE_* repo variables and TF_STATE_* org variables."
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          echo "Deploying to subscription ${ARM_SUBSCRIPTION_ID} (tenant ${ARM_TENANT_ID}) as client ${ARM_CLIENT_ID}"
           if ! grep -qs 'backend "azurerm"' *.tf; then
             echo "Error: no 'backend \"azurerm\" {}' block in ${{ inputs.working_directory }}; refusing to use local state."
-            exit 1
-          fi
-          if [ -z "$TF_STATE_STORAGE_ACCOUNT" ]; then
-            echo "Error: TF_STATE_* org variables are not set."
             exit 1
           fi
           # Staging/production are approval gates over the same deployment, so one state per workspace.
@@ -78,29 +92,10 @@ jobs:
             -backend-config="key=${{ github.event.repository.name }}/${{ inputs.working_directory }}.tfstate" \
             -backend-config="use_oidc=true" \
             -backend-config="use_azuread_auth=true"
-        env:
-          ARM_USE_OIDC: true
-          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          TF_STATE_SUBSCRIPTION_ID: ${{ vars.TF_STATE_SUBSCRIPTION_ID }}
-          TF_STATE_RESOURCE_GROUP: ${{ vars.TF_STATE_RESOURCE_GROUP }}
-          TF_STATE_STORAGE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
-          TF_STATE_CONTAINER: ${{ vars.TF_STATE_CONTAINER }}
 
       - name: Terraform Plan
         run: terraform plan -out=tfplan
-        env:
-          ARM_USE_OIDC: true
-          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Terraform Apply
         if: inputs.is_apply == true
         run: terraform apply -auto-approve tfplan
-        env:
-          ARM_USE_OIDC: true
-          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
