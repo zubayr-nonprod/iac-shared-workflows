@@ -60,7 +60,7 @@ on:
 
 jobs:
   scaffold:
-    name: 'Scaffold ${{ inputs.cloud_provider }} repo: ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}'
+    name: 'Render and create ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}'
     runs-on: ubuntu-latest
     env:
       # Scaffolded repos are prefixed with the cloud provider (e.g. azure-networking).
@@ -79,14 +79,6 @@ jobs:
             exit 1
           fi
 
-      - name: Create GitHub Repository
-        env:
-          GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
-        run: |
-          gh repo create ${{ github.repository_owner }}/${REPO_NAME} \
-            --${{ inputs.visibility }} \
-            --description "${{ inputs.description }}"
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -95,37 +87,32 @@ jobs:
       - name: Install Copier
         run: pipx install copier
 
+      # Rendered before the repo is created so a template error can't leave an empty repo behind.
       - name: Render scaffold with Copier
         run: |
-          ROOT=scaffold-workspace
-
-          # Render the full repo (docs/, iac/ws-<name>/ Terraform files, and
-          # the provider-specific pipeline) from the Copier template.
           # --defaults keeps it non-interactive; all answers are passed via --data.
           copier copy --defaults \
             --data repo_name="${REPO_NAME}" \
             --data cloud_provider="${{ inputs.cloud_provider }}" \
             --data workspace_name="${{ inputs.workspace_name }}" \
             --data description="${{ inputs.description }}" \
-            ./scaffolding/copier-template "$ROOT"
+            ./scaffolding/copier-template scaffold-workspace
 
-      - name: Commit and push scaffold
+      - name: Upload rendered scaffold
+        uses: actions/upload-artifact@v4
+        with:
+          name: scaffold
+          path: scaffold-workspace
+          include-hidden-files: true
+          retention-days: 1
+
+      - name: Create GitHub Repository
         env:
           GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
         run: |
-          ROOT=scaffold-workspace
-
-          # --- Commit and push ---
-          cd "$ROOT"
-          git init
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote add origin \
-            https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository_owner }}/${REPO_NAME}.git
-          git add .
-          git commit -m "chore: scaffold ${{ inputs.cloud_provider }} Terraform IaC repo"
-          git branch -M main
-          git push -u origin main
+          gh repo create ${{ github.repository_owner }}/${REPO_NAME} \
+            --${{ inputs.visibility }} \
+            --description "${{ inputs.description }}"
 
   azure_bootstrap:
     name: 'Bootstrap Azure OIDC for ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}'
@@ -142,10 +129,10 @@ jobs:
       REPO_NAME: ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}
       # Use the per-run input if given, otherwise fall back to the repo/org variable.
       APP_ID: ${{ inputs.azure_app_client_id != '' && inputs.azure_app_client_id || vars.AZURE_APP_CLIENT_ID }}
-      # IDs aren't sensitive, so accept them as either Actions secrets or variables.
-      BOOTSTRAP_CLIENT_ID: ${{ secrets.AZURE_BOOTSTRAP_CLIENT_ID || vars.AZURE_BOOTSTRAP_CLIENT_ID }}
-      TENANT_ID: ${{ secrets.AZURE_TENANT_ID || vars.AZURE_TENANT_ID }}
-      SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID || vars.AZURE_SUBSCRIPTION_ID }}
+      # IDs aren't sensitive, so accept them as either Actions variables (preferred) or secrets.
+      BOOTSTRAP_CLIENT_ID: ${{ vars.AZURE_BOOTSTRAP_CLIENT_ID || secrets.AZURE_BOOTSTRAP_CLIENT_ID }}
+      TENANT_ID: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
+      SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
     steps:
       - name: Validate Azure inputs
         run: |
@@ -174,9 +161,18 @@ jobs:
 
       - name: Register federated credentials
         env:
+          GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
           ORG: ${{ github.repository_owner }}
           REPO: ${{ env.REPO_NAME }}
         run: |
+          # New repos may use immutable subjects (repo:<org>@<id>/<repo>@<id>), so ask GitHub for the exact prefix.
+          prefix=$(gh api "repos/${ORG}/${REPO}/actions/oidc/customization/sub" -q '.sub_claim_prefix')
+          if [ -z "$prefix" ]; then
+            echo "Error: could not read the OIDC subject prefix for ${ORG}/${REPO}."
+            exit 1
+          fi
+          echo "OIDC subject prefix: $prefix"
+
           cred_exists() {
             [ "$(az ad app federated-credential list --id "$APP_ID" --query "length([?name=='$1'])" -o tsv)" = "1" ]
           }
@@ -194,7 +190,7 @@ jobs:
               if az ad app federated-credential create --id "$APP_ID" -o none --parameters "{
                 \"name\": \"${name}\",
                 \"issuer\": \"https://token.actions.githubusercontent.com\",
-                \"subject\": \"repo:${ORG}/${REPO}:environment:${env_name}\",
+                \"subject\": \"${prefix}:environment:${env_name}\",
                 \"audiences\": [\"api://AzureADTokenExchange\"]
               }"; then
                 echo "Created federated credential '$name'."
@@ -218,7 +214,7 @@ jobs:
             --role "Contributor" \
             --scope "/subscriptions/${SUBSCRIPTION_ID}"
 
-      - name: Configure GitHub environments and secrets
+      - name: Configure GitHub environments and variables
         env:
           GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
           ORG: ${{ github.repository_owner }}
@@ -227,6 +223,37 @@ jobs:
           for env_name in staging-azure production-azure; do
             gh api -X PUT "repos/${ORG}/${REPO}/environments/${env_name}" >/dev/null
           done
-          gh secret set AZURE_CLIENT_ID       -R "${ORG}/${REPO}" -b "$APP_ID"
-          gh secret set AZURE_TENANT_ID       -R "${ORG}/${REPO}" -b "$TENANT_ID"
-          gh secret set AZURE_SUBSCRIPTION_ID -R "${ORG}/${REPO}" -b "$SUBSCRIPTION_ID"
+          # Identifiers only (OIDC has no client secret), so variables keep them visible in logs.
+          gh variable set AZURE_CLIENT_ID       -R "${ORG}/${REPO}" -b "$APP_ID"
+          gh variable set AZURE_TENANT_ID       -R "${ORG}/${REPO}" -b "$TENANT_ID"
+          gh variable set AZURE_SUBSCRIPTION_ID -R "${ORG}/${REPO}" -b "$SUBSCRIPTION_ID"
+
+  push_scaffold:
+    name: 'Push scaffold to ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}'
+    needs: [scaffold, azure_bootstrap]
+    # Pushing to main triggers the repo's pipeline, so wait for OIDC/secrets to exist (bootstrap is skipped for AWS).
+    if: always() && needs.scaffold.result == 'success' && (needs.azure_bootstrap.result == 'success' || needs.azure_bootstrap.result == 'skipped')
+    runs-on: ubuntu-latest
+    env:
+      REPO_NAME: ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}
+    steps:
+      - name: Download rendered scaffold
+        uses: actions/download-artifact@v4
+        with:
+          name: scaffold
+          path: scaffold-workspace
+
+      - name: Commit and push scaffold
+        working-directory: scaffold-workspace
+        env:
+          GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
+        run: |
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add origin \
+            https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository_owner }}/${REPO_NAME}.git
+          git add .
+          git commit -m "chore: scaffold ${{ inputs.cloud_provider }} Terraform IaC repo"
+          git branch -M main
+          git push -u origin main

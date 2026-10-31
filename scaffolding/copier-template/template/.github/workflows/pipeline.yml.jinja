@@ -1,5 +1,8 @@
 {% if cloud_provider == "aws" -%}
 name: 'AWS Infrastructure Pipeline'
+{% else -%}
+name: 'Azure Infrastructure Pipeline'
+{% endif %}
 
 on:
   pull_request:
@@ -12,62 +15,106 @@ permissions:
   contents: read
 
 jobs:
+  discover:
+    name: 'Discover changed workspaces'
+    runs-on: ubuntu-latest
+{% raw %}    outputs:
+      workspaces: ${{ steps.list.outputs.workspaces }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: List changed iac/ws-* directories
+        id: list
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          all=$(find iac -mindepth 1 -maxdepth 1 -type d -name 'ws-*' | sort)
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            range="${PR_BASE_SHA}...${PR_HEAD_SHA}"
+          else
+            range="${PUSH_BEFORE}..${PUSH_AFTER}"
+          fi
+
+          # First push / force-push leave no usable diff base, so fall back to every workspace.
+          if ! changed=$(git diff --name-only "$range" 2>/dev/null); then
+            echo "Could not diff '$range'; running all workspaces."
+            selected="$all"
+          elif grep -qE '^(modules/|\.github/workflows/pipeline\.yml$)' <<<"$changed"; then
+            echo "Shared modules or pipeline changed; running all workspaces."
+            selected="$all"
+          else
+            selected=$(for ws in $all; do grep -q "^${ws}/" <<<"$changed" && echo "$ws"; done || true)
+          fi
+
+          workspaces=$(printf '%s\n' "$selected" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "Workspaces: $workspaces"
+          echo "workspaces=$workspaces" >> "$GITHUB_OUTPUT"
+{% endraw %}{% if cloud_provider == "aws" %}{% raw %}
   aws-plan:
-    if: github.event_name == 'pull_request'
+    name: 'Plan ${{ matrix.workspace }}'
+    needs: discover
+    if: github.event_name == 'pull_request' && needs.discover.outputs.workspaces != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: ${{ fromJSON(needs.discover.outputs.workspaces) }}
     uses: zubayr-nonprod/iac-shared-workflows/.github/workflows/tf-aws-template.yml@main
     with:
       environment: 'staging-aws'
       is_apply: false
-      working_directory: 'iac/ws-{{ workspace_name }}'
+      working_directory: ${{ matrix.workspace }}
     secrets:
-{% raw %}      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-{% endraw %}
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+
   aws-apply:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    name: 'Apply ${{ matrix.workspace }}'
+    needs: discover
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.discover.outputs.workspaces != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: ${{ fromJSON(needs.discover.outputs.workspaces) }}
     uses: zubayr-nonprod/iac-shared-workflows/.github/workflows/tf-aws-template.yml@main
     with:
       environment: 'production-aws'
       is_apply: true
-      working_directory: 'iac/ws-{{ workspace_name }}'
+      working_directory: ${{ matrix.workspace }}
     secrets:
-{% raw %}      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-{% endraw %}
-{% else -%}
-name: 'Azure Infrastructure Pipeline'
-
-on:
-  pull_request:
-    branches: [ main ]
-  push:
-    branches: [ main ]
-
-permissions:
-  id-token: write
-  contents: read
-
-jobs:
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+{% endraw %}{% else %}{% raw %}
   azure-plan:
-    if: github.event_name == 'pull_request'
+    name: 'Plan ${{ matrix.workspace }}'
+    needs: discover
+    if: github.event_name == 'pull_request' && needs.discover.outputs.workspaces != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: ${{ fromJSON(needs.discover.outputs.workspaces) }}
     uses: zubayr-nonprod/iac-shared-workflows/.github/workflows/tf-azure-template.yml@main
     with:
       environment: 'staging-azure'
       is_apply: false
-      working_directory: 'iac/ws-{{ workspace_name }}'
-    secrets:
-{% raw %}      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-{% endraw %}
+      working_directory: ${{ matrix.workspace }}
+
   azure-apply:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    name: 'Apply ${{ matrix.workspace }}'
+    needs: discover
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.discover.outputs.workspaces != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: ${{ fromJSON(needs.discover.outputs.workspaces) }}
     uses: zubayr-nonprod/iac-shared-workflows/.github/workflows/tf-azure-template.yml@main
     with:
       environment: 'production-azure'
       is_apply: true
-      working_directory: 'iac/ws-{{ workspace_name }}'
-    secrets:
-{% raw %}      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-{% endraw %}
-{% endif -%}
+      working_directory: ${{ matrix.workspace }}
+{% endraw %}{% endif %}
