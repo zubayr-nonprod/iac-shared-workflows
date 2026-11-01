@@ -4,17 +4,19 @@ name: 'Delete IaC Repository'
 # same name can be reused while developing/testing the scaffold workflow.
 #
 # Removes:
-#   - Federated credentials on the Azure app (AZURE_APP_CLIENT_ID) whose subject
-#     references the repo (azure-* repos only).
-#   - The GitHub repository itself (its environments and secrets go with it).
+#   - The repo's deploy identity 'id-gh-<repo>' (and with it its federated credentials)
+#     plus its role assignments in every subscription the bootstrap identity can see.
+#   - Legacy federated credentials on the shared app (AZURE_APP_CLIENT_ID) for repos
+#     scaffolded before per-repo identities.
+#   - The GitHub repository itself (its environments and variables go with it).
 #
 # Deliberately NOT removed:
-#   - The Contributor role assignment for the Azure app; it's shared by every scaffolded repo.
-#   - Any cloud resources the repo's pipeline deployed. Run 'terraform destroy' first if needed.
+#   - Any cloud resources the repo's pipeline deployed, or its Terraform state blobs.
+#     Run 'terraform destroy' first if needed.
 #
 # Requires:
 #   - SCAFFOLD_GITHUB_TOKEN with Administration: read & write (or classic 'delete_repo' scope).
-#   - The same 'production' environment secrets as the scaffold workflow's azure_bootstrap job.
+#   - The same 'production' environment variables as the scaffold workflow's Azure jobs.
 
 on:
   workflow_dispatch:
@@ -77,7 +79,7 @@ jobs:
           echo "exists=true" >> "$GITHUB_OUTPUT"
 
   azure_cleanup:
-    name: 'Remove Azure federated credentials for ${{ inputs.repo_name }}'
+    name: 'Remove Azure identity and access for ${{ inputs.repo_name }}'
     needs: validate
     if: startsWith(inputs.repo_name, 'azure-')
     runs-on: ubuntu-latest
@@ -87,30 +89,55 @@ jobs:
       contents: read
     env:
       REPO_NAME: ${{ inputs.repo_name }}
-      APP_ID: ${{ vars.AZURE_APP_CLIENT_ID }}
+      IDENTITY_NAME: id-gh-${{ inputs.repo_name }}
+      IDENTITY_SUBSCRIPTION_ID: ${{ vars.AZURE_IDENTITY_SUBSCRIPTION_ID }}
+      IDENTITY_RESOURCE_GROUP: ${{ vars.AZURE_IDENTITY_RESOURCE_GROUP }}
+      LEGACY_APP_ID: ${{ vars.AZURE_APP_CLIENT_ID }}
     steps:
       - name: Azure login (OIDC)
         uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_BOOTSTRAP_CLIENT_ID || secrets.AZURE_BOOTSTRAP_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
+          allow-no-subscriptions: true
 
-      - name: Delete federated credentials referencing the repo
+      - name: Delete deploy identity and its role assignments
+        run: |
+          principal_id=$(az identity show -n "$IDENTITY_NAME" -g "$IDENTITY_RESOURCE_GROUP" \
+            --subscription "$IDENTITY_SUBSCRIPTION_ID" --query principalId -o tsv 2>/dev/null || true)
+          if [ -z "$principal_id" ]; then
+            echo "No deploy identity '$IDENTITY_NAME' found."
+            exit 0
+          fi
+
+          # Remove assignments before the identity, otherwise they're left behind as 'Unknown' principals.
+          for sub in $(az account list --query "[?state=='Enabled'].id" -o tsv); do
+            ids=$(az role assignment list --all --subscription "$sub" --query "[?principalId=='$principal_id'].id" -o tsv)
+            for id in $ids; do
+              echo "Deleting role assignment $id"
+              az role assignment delete --ids "$id"
+            done
+          done
+
+          echo "Deleting identity $IDENTITY_NAME"
+          az identity delete -n "$IDENTITY_NAME" -g "$IDENTITY_RESOURCE_GROUP" --subscription "$IDENTITY_SUBSCRIPTION_ID"
+
+      - name: Delete legacy federated credentials on the shared app
+        if: env.LEGACY_APP_ID != ''
         env:
           ORG: ${{ github.repository_owner }}
         run: |
           # Matches both 'repo:<org>/<repo>:' and immutable 'repo:<org>@<id>/<repo>@<id>:' subjects.
           pattern="^repo:${ORG}(@[0-9]+)?/${REPO_NAME}(@[0-9]+)?:"
-          ids=$(az ad app federated-credential list --id "$APP_ID" --query '[].[id, subject]' -o tsv \
+          ids=$(az ad app federated-credential list --id "$LEGACY_APP_ID" --query '[].[id, subject]' -o tsv \
             | awk -F'\t' -v p="$pattern" '$2 ~ p { print $1 }')
           if [ -z "$ids" ]; then
-            echo "No federated credentials reference ${ORG}/${REPO_NAME}."
+            echo "No legacy federated credentials reference ${ORG}/${REPO_NAME}."
             exit 0
           fi
           for id in $ids; do
-            echo "Deleting federated credential $id"
-            az ad app federated-credential delete --id "$APP_ID" --federated-credential-id "$id"
+            echo "Deleting legacy federated credential $id"
+            az ad app federated-credential delete --id "$LEGACY_APP_ID" --federated-credential-id "$id"
           done
 
   delete_repo:

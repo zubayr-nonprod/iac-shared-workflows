@@ -5,20 +5,19 @@ name: 'Scaffold IaC Repository'
 #   - repo scope (to create repos and push code)
 #   - Or a GitHub App token with contents:write and administration:write on the org.
 #
-# For Azure repos, the optional bootstrap job also needs these secrets configured
-# on the 'production' environment of THIS (iac-shared-workflows) repo, plus a
-# bootstrap app registration whose federated credential trusts subject
-# 'repo:<owner>/iac-shared-workflows:environment:production':
-#   - AZURE_BOOTSTRAP_CLIENT_ID : client ID of the bootstrap app used to log in here
-#   - AZURE_TENANT_ID           : Entra tenant ID
-#   - AZURE_SUBSCRIPTION_ID      : target subscription ID
-# The bootstrap identity needs rights to manage the target app's federated
-# credentials (e.g. Application Administrator) and to assign RBAC on the
-# subscription (e.g. Owner / User Access Administrator).
+# For Azure repos, the bootstrap jobs log in as the bootstrap app registration
+# (AZURE_BOOTSTRAP_CLIENT_ID / AZURE_TENANT_ID variables on THIS repo's 'production'
+# environment), whose federated credential trusts
+# 'repo:<owner>/iac-shared-workflows:environment:production'.
 #
-# The Azure app registration (client) ID used by scaffolded repos defaults to
-# the repo/org variable 'AZURE_APP_CLIENT_ID'; set it once to avoid entering it
-# on every run. The 'azure_app_client_id' input is an optional per-run override.
+# Each Azure repo gets its own deploy identity: a user-assigned managed identity
+# 'id-gh-<repo>' in AZURE_IDENTITY_RESOURCE_GROUP (AZURE_IDENTITY_SUBSCRIPTION_ID),
+# with Contributor on the 'azure_subscription' input (name or ID) and Storage Blob
+# Data Contributor on the Terraform state container (TF_STATE_* org variables).
+# The bootstrap identity needs:
+#   - Managed Identity Contributor on the identity resource group.
+#   - Role Based Access Control Administrator (non-privileged roles only) on the
+#     target subscription and the state container, e.g. via a management group.
 
 on:
   workflow_dispatch:
@@ -34,8 +33,8 @@ on:
         options:
           - aws
           - azure
-      azure_app_client_id:
-        description: 'Azure app registration (client) ID for OIDC — optional; defaults to the AZURE_APP_CLIENT_ID variable'
+      azure_subscription:
+        description: 'Azure only (required): name or ID of the subscription the repo deploys to'
         required: false
         type: string
         default: ''
@@ -59,8 +58,91 @@ on:
         default: private
 
 jobs:
+  azure_preflight:
+    name: 'Resolve Azure subscription'
+    if: inputs.cloud_provider == 'azure'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      subscription_id: ${{ steps.resolve.outputs.subscription_id }}
+    env:
+      BOOTSTRAP_CLIENT_ID: ${{ vars.AZURE_BOOTSTRAP_CLIENT_ID || secrets.AZURE_BOOTSTRAP_CLIENT_ID }}
+      TENANT_ID: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
+      IDENTITY_SUBSCRIPTION_ID: ${{ vars.AZURE_IDENTITY_SUBSCRIPTION_ID }}
+      IDENTITY_RESOURCE_GROUP: ${{ vars.AZURE_IDENTITY_RESOURCE_GROUP }}
+      IDENTITY_LOCATION: ${{ vars.AZURE_IDENTITY_LOCATION }}
+      TF_STATE_SUBSCRIPTION_ID: ${{ vars.TF_STATE_SUBSCRIPTION_ID }}
+      TF_STATE_RESOURCE_GROUP: ${{ vars.TF_STATE_RESOURCE_GROUP }}
+      TF_STATE_STORAGE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
+      TF_STATE_CONTAINER: ${{ vars.TF_STATE_CONTAINER }}
+      SUBSCRIPTION_INPUT: ${{ inputs.azure_subscription }}
+    steps:
+      - name: Validate Azure inputs
+        run: |
+          missing=0
+          [ -n "$SUBSCRIPTION_INPUT" ] || { echo "Error: the 'azure_subscription' input is required for Azure repos."; missing=1; }
+          for name in BOOTSTRAP_CLIENT_ID TENANT_ID IDENTITY_SUBSCRIPTION_ID IDENTITY_RESOURCE_GROUP IDENTITY_LOCATION \
+                      TF_STATE_SUBSCRIPTION_ID TF_STATE_RESOURCE_GROUP TF_STATE_STORAGE_ACCOUNT TF_STATE_CONTAINER; do
+            [ -n "${!name}" ] || { echo "Error: $name is empty; check the AZURE_*/TF_STATE_* variables."; missing=1; }
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.BOOTSTRAP_CLIENT_ID }}
+          tenant-id: ${{ env.TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Resolve subscription and check bootstrap access
+        id: resolve
+        run: |
+          # Only subscriptions where the bootstrap identity holds a role are listed.
+          matches=$(az account list --all -o json | jq -c --arg s "$SUBSCRIPTION_INPUT" \
+            '[.[] | select((.id | ascii_downcase) == ($s | ascii_downcase) or .name == $s) | {id, name, state}]')
+          count=$(jq length <<<"$matches")
+          if [ "$count" -eq 0 ]; then
+            echo "Error: subscription '$SUBSCRIPTION_INPUT' not found, or the bootstrap identity has no role on it."
+            echo "Grant it 'Role Based Access Control Administrator' (limited to Contributor) on that subscription first."
+            exit 1
+          fi
+          if [ "$count" -gt 1 ]; then
+            echo "Error: several subscriptions are named '$SUBSCRIPTION_INPUT'; use the subscription ID instead."
+            exit 1
+          fi
+          id=$(jq -r '.[0].id' <<<"$matches")
+          name=$(jq -r '.[0].name' <<<"$matches")
+          state=$(jq -r '.[0].state' <<<"$matches")
+          if [ "$state" != "Enabled" ]; then
+            echo "Error: subscription '$name' ($id) is $state."
+            exit 1
+          fi
+
+          boot_oid=$(az ad sp show --id "$BOOTSTRAP_CLIENT_ID" --query id -o tsv)
+          can_assign=$(az role assignment list --scope "/subscriptions/$id" --include-inherited \
+            --query "length([?principalId=='$boot_oid' && contains(['Owner', 'User Access Administrator', 'Role Based Access Control Administrator'], roleDefinitionName)])" -o tsv)
+          if [ "$can_assign" = "0" ]; then
+            echo "Error: the bootstrap identity can see '$name' but can't assign roles there."
+            echo "Grant it 'Role Based Access Control Administrator' on /subscriptions/$id or a management group above it."
+            exit 1
+          fi
+
+          if ! az group show -n "$IDENTITY_RESOURCE_GROUP" --subscription "$IDENTITY_SUBSCRIPTION_ID" -o none 2>/dev/null; then
+            echo "Error: can't read identity resource group '$IDENTITY_RESOURCE_GROUP'; grant the bootstrap identity Managed Identity Contributor on it."
+            exit 1
+          fi
+
+          echo "Target subscription: $name ($id)"
+          echo "subscription_id=$id" >> "$GITHUB_OUTPUT"
+
   scaffold:
     name: 'Render and create ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}'
+    needs: azure_preflight
+    # Runs for AWS (preflight skipped) and for Azure only once the subscription checks pass.
+    if: ${{ !cancelled() && (needs.azure_preflight.result == 'success' || needs.azure_preflight.result == 'skipped') }}
     runs-on: ubuntu-latest
     env:
       # Scaffolded repos are prefixed with the cloud provider (e.g. azure-networking).
@@ -116,10 +198,10 @@ jobs:
 
   azure_bootstrap:
     name: 'Bootstrap Azure OIDC for ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}'
-    needs: scaffold
+    needs: [azure_preflight, scaffold]
     if: inputs.cloud_provider == 'azure'
     runs-on: ubuntu-latest
-    # The AZURE_* bootstrap secrets are environment secrets on 'production'.
+    # The AZURE_* bootstrap variables are on the 'production' environment.
     environment: production
     permissions:
       id-token: write
@@ -127,77 +209,69 @@ jobs:
     env:
       # Scaffolded repos are prefixed with the cloud provider (e.g. azure-networking).
       REPO_NAME: ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}
-      # Use the per-run input if given, otherwise fall back to the repo/org variable.
-      APP_ID: ${{ inputs.azure_app_client_id != '' && inputs.azure_app_client_id || vars.AZURE_APP_CLIENT_ID }}
-      # IDs aren't sensitive, so accept them as either Actions variables (preferred) or secrets.
+      IDENTITY_NAME: id-gh-${{ inputs.cloud_provider }}-${{ inputs.repo_name }}
       BOOTSTRAP_CLIENT_ID: ${{ vars.AZURE_BOOTSTRAP_CLIENT_ID || secrets.AZURE_BOOTSTRAP_CLIENT_ID }}
       TENANT_ID: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
-      SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
+      SUBSCRIPTION_ID: ${{ needs.azure_preflight.outputs.subscription_id }}
+      IDENTITY_SUBSCRIPTION_ID: ${{ vars.AZURE_IDENTITY_SUBSCRIPTION_ID }}
+      IDENTITY_RESOURCE_GROUP: ${{ vars.AZURE_IDENTITY_RESOURCE_GROUP }}
+      IDENTITY_LOCATION: ${{ vars.AZURE_IDENTITY_LOCATION }}
+      STATE_CONTAINER_SCOPE: /subscriptions/${{ vars.TF_STATE_SUBSCRIPTION_ID }}/resourceGroups/${{ vars.TF_STATE_RESOURCE_GROUP }}/providers/Microsoft.Storage/storageAccounts/${{ vars.TF_STATE_STORAGE_ACCOUNT }}/blobServices/default/containers/${{ vars.TF_STATE_CONTAINER }}
     steps:
-      - name: Validate Azure inputs
-        run: |
-          echo "input given?   ${{ inputs.azure_app_client_id != '' }}"
-          echo "vars set?      ${{ vars.AZURE_APP_CLIENT_ID != '' }}"
-          echo "APP_ID length: ${#APP_ID}"
-          if [ -z "${APP_ID}" ]; then
-            echo "Error: no Azure app client ID. Provide the 'azure_app_client_id' input or set the AZURE_APP_CLIENT_ID Actions *variable* (Variables tab, not Secrets)."
-            exit 1
-          fi
-          missing=0
-          for name in BOOTSTRAP_CLIENT_ID TENANT_ID SUBSCRIPTION_ID; do
-            if [ -z "${!name}" ]; then
-              echo "Error: AZURE_${name} is not set as a repo/org secret or variable accessible to ${{ github.repository }}."
-              missing=1
-            fi
-          done
-          [ "$missing" -eq 0 ] || exit 1
-
       - name: Azure login (OIDC)
         uses: azure/login@v2
         with:
           client-id: ${{ env.BOOTSTRAP_CLIENT_ID }}
           tenant-id: ${{ env.TENANT_ID }}
-          subscription-id: ${{ env.SUBSCRIPTION_ID }}
+          subscription-id: ${{ env.IDENTITY_SUBSCRIPTION_ID }}
+
+      - name: Create deploy identity
+        env:
+          ORG: ${{ github.repository_owner }}
+        run: |
+          # Kept outside the target subscription so the repo's Contributor role can't edit its own identity.
+          identity=$(az identity create -n "$IDENTITY_NAME" -g "$IDENTITY_RESOURCE_GROUP" \
+            --subscription "$IDENTITY_SUBSCRIPTION_ID" -l "$IDENTITY_LOCATION" \
+            --tags github-repo="${ORG}/${REPO_NAME}" managed-by=iac-shared-workflows -o json)
+          client_id=$(jq -r .clientId <<<"$identity")
+          principal_id=$(jq -r .principalId <<<"$identity")
+          echo "Deploy identity: $IDENTITY_NAME (client $client_id, principal $principal_id)"
+          echo "DEPLOY_CLIENT_ID=$client_id" >> "$GITHUB_ENV"
+          echo "DEPLOY_PRINCIPAL_ID=$principal_id" >> "$GITHUB_ENV"
 
       - name: Register federated credentials
         env:
           GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
           ORG: ${{ github.repository_owner }}
-          REPO: ${{ env.REPO_NAME }}
         run: |
           # New repos may use immutable subjects (repo:<org>@<id>/<repo>@<id>), so ask GitHub for the exact prefix.
-          prefix=$(gh api "repos/${ORG}/${REPO}/actions/oidc/customization/sub" -q '.sub_claim_prefix')
+          prefix=$(gh api "repos/${ORG}/${REPO_NAME}/actions/oidc/customization/sub" -q '.sub_claim_prefix')
           if [ -z "$prefix" ]; then
-            echo "Error: could not read the OIDC subject prefix for ${ORG}/${REPO}."
+            echo "Error: could not read the OIDC subject prefix for ${ORG}/${REPO_NAME}."
             exit 1
           fi
           echo "OIDC subject prefix: $prefix"
 
-          cred_exists() {
-            [ "$(az ad app federated-credential list --id "$APP_ID" --query "length([?name=='$1'])" -o tsv)" = "1" ]
-          }
+          fic() { az identity federated-credential "$@" --identity-name "$IDENTITY_NAME" \
+            -g "$IDENTITY_RESOURCE_GROUP" --subscription "$IDENTITY_SUBSCRIPTION_ID"; }
 
-          # One federated credential per GitHub environment used by the pipeline.
+          # One credential per GitHub environment. Azure rejects concurrent credential writes on
+          # one identity, and a "failed" create may still land, so re-check before each retry.
           for env_name in staging-azure production-azure; do
-            name="gh-${REPO}-${env_name}"
-            # Entra rejects concurrent writes to the same app, and a "failed" create may
-            # still have landed, so re-check existence before each retry.
             for attempt in 1 2 3 4 5; do
-              if cred_exists "$name"; then
-                echo "Federated credential '$name' exists."
+              if fic show -n "$env_name" -o none 2>/dev/null; then
+                echo "Federated credential '$env_name' exists."
                 break
               fi
-              if az ad app federated-credential create --id "$APP_ID" -o none --parameters "{
-                \"name\": \"${name}\",
-                \"issuer\": \"https://token.actions.githubusercontent.com\",
-                \"subject\": \"${prefix}:environment:${env_name}\",
-                \"audiences\": [\"api://AzureADTokenExchange\"]
-              }"; then
-                echo "Created federated credential '$name'."
+              if fic create -n "$env_name" -o none \
+                  --issuer https://token.actions.githubusercontent.com \
+                  --subject "${prefix}:environment:${env_name}" \
+                  --audiences api://AzureADTokenExchange; then
+                echo "Created federated credential '$env_name'."
                 break
               fi
               if [ "$attempt" -eq 5 ]; then
-                echo "Error: failed to create federated credential '$name' after $attempt attempts."
+                echo "Error: failed to create federated credential '$env_name' after $attempt attempts."
                 exit 1
               fi
               echo "Attempt $attempt failed; retrying in $((attempt * 10))s..."
@@ -205,34 +279,43 @@ jobs:
             done
           done
 
-      - name: Assign Contributor role to the service principal
+      - name: Assign roles to the deploy identity
         run: |
-          OBJECT_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
-          az role assignment create \
-            --assignee-object-id "$OBJECT_ID" \
-            --assignee-principal-type ServicePrincipal \
-            --role "Contributor" \
-            --scope "/subscriptions/${SUBSCRIPTION_ID}"
+          assign() {
+            # A brand-new identity can take a moment to replicate, so retry.
+            for attempt in 1 2 3 4 5; do
+              if az role assignment create --assignee-object-id "$DEPLOY_PRINCIPAL_ID" \
+                  --assignee-principal-type ServicePrincipal --role "$1" --scope "$2" -o none; then
+                echo "Assigned '$1' on $2"
+                return 0
+              fi
+              echo "Attempt $attempt failed; retrying in $((attempt * 10))s..."
+              sleep $((attempt * 10))
+            done
+            echo "Error: could not assign '$1' on $2."
+            return 1
+          }
+          assign "Contributor" "/subscriptions/${SUBSCRIPTION_ID}"
+          assign "Storage Blob Data Contributor" "$STATE_CONTAINER_SCOPE"
 
       - name: Configure GitHub environments and variables
         env:
           GH_TOKEN: ${{ secrets.SCAFFOLD_GITHUB_TOKEN }}
           ORG: ${{ github.repository_owner }}
-          REPO: ${{ env.REPO_NAME }}
         run: |
           for env_name in staging-azure production-azure; do
-            gh api -X PUT "repos/${ORG}/${REPO}/environments/${env_name}" >/dev/null
+            gh api -X PUT "repos/${ORG}/${REPO_NAME}/environments/${env_name}" >/dev/null
           done
           # Identifiers only (OIDC has no client secret), so variables keep them visible in logs.
-          gh variable set AZURE_CLIENT_ID       -R "${ORG}/${REPO}" -b "$APP_ID"
-          gh variable set AZURE_TENANT_ID       -R "${ORG}/${REPO}" -b "$TENANT_ID"
-          gh variable set AZURE_SUBSCRIPTION_ID -R "${ORG}/${REPO}" -b "$SUBSCRIPTION_ID"
+          gh variable set AZURE_CLIENT_ID       -R "${ORG}/${REPO_NAME}" -b "$DEPLOY_CLIENT_ID"
+          gh variable set AZURE_TENANT_ID       -R "${ORG}/${REPO_NAME}" -b "$TENANT_ID"
+          gh variable set AZURE_SUBSCRIPTION_ID -R "${ORG}/${REPO_NAME}" -b "$SUBSCRIPTION_ID"
 
   push_scaffold:
     name: 'Push scaffold to ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}'
     needs: [scaffold, azure_bootstrap]
-    # Pushing to main triggers the repo's pipeline, so wait for OIDC/secrets to exist (bootstrap is skipped for AWS).
-    if: always() && needs.scaffold.result == 'success' && (needs.azure_bootstrap.result == 'success' || needs.azure_bootstrap.result == 'skipped')
+    # Pushing to main triggers the repo's pipeline, so wait for OIDC/variables to exist (bootstrap is skipped for AWS).
+    if: ${{ !cancelled() && needs.scaffold.result == 'success' && (needs.azure_bootstrap.result == 'success' || needs.azure_bootstrap.result == 'skipped') }}
     runs-on: ubuntu-latest
     env:
       REPO_NAME: ${{ inputs.cloud_provider }}-${{ inputs.repo_name }}
