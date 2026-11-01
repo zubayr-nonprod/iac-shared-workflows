@@ -84,14 +84,22 @@ jobs:
             exit 1
           fi
           # Staging/production are approval gates over the same deployment, so one state per workspace.
-          terraform init \
-            -backend-config="subscription_id=${TF_STATE_SUBSCRIPTION_ID}" \
-            -backend-config="resource_group_name=${TF_STATE_RESOURCE_GROUP}" \
-            -backend-config="storage_account_name=${TF_STATE_STORAGE_ACCOUNT}" \
-            -backend-config="container_name=${TF_STATE_CONTAINER}" \
-            -backend-config="key=${{ github.event.repository.name }}/${{ inputs.working_directory }}.tfstate" \
-            -backend-config="use_oidc=true" \
-            -backend-config="use_azuread_auth=true"
+          # Retried because a newly scaffolded repo's role assignments can take a few minutes to apply.
+          for attempt in 1 2 3 4; do
+            if terraform init \
+                -backend-config="subscription_id=${TF_STATE_SUBSCRIPTION_ID}" \
+                -backend-config="resource_group_name=${TF_STATE_RESOURCE_GROUP}" \
+                -backend-config="storage_account_name=${TF_STATE_STORAGE_ACCOUNT}" \
+                -backend-config="container_name=${TF_STATE_CONTAINER}" \
+                -backend-config="key=${{ github.event.repository.name }}/${{ inputs.working_directory }}.tfstate" \
+                -backend-config="use_oidc=true" \
+                -backend-config="use_azuread_auth=true"; then
+              break
+            fi
+            [ "$attempt" -lt 4 ] || exit 1
+            echo "terraform init failed (attempt $attempt); retrying in $((attempt * 30))s..."
+            sleep $((attempt * 30))
+          done
 
       - name: Terraform Plan
         run: terraform plan -out=tfplan
